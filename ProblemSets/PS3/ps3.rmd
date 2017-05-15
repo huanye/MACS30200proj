@@ -1,0 +1,220 @@
+---
+title: "PS3"
+author: "Huanye Liu"
+output: pdf_document
+---
+
+```{r library, include=FALSE}
+library(tidyverse)
+library(purrr)
+library(lmtest)
+library(car)
+library(stringr)
+library(MVN)
+library(Amelia)
+library(broom)
+library(forcats)
+biden_raw=read_csv("biden.csv")
+biden = biden_raw[complete.cases(biden_raw),]
+```
+```{r regression, include = TRUE}
+bd=lm(biden~age+female+educ,data=biden)
+bd$coefficients
+```
+
+## Regression diagnostics
+        
+1 We use a colored bubble plot to illustrate the leverage and discrepancy for each observation as shown below. From the bubble plot we can see among all 167 either high leverage or high discrepancy observations, 90 observations have high influence, most of which are due to high discrepancy. 
+
+```{r bubble, echo=TRUE}
+biden_<- biden %>%
+  mutate(hat = hatvalues(bd),
+         student = rstudent(bd),
+         cooksd = cooks.distance(bd)) %>%
+  mutate(lev = ifelse(hat > 2 * mean(hat), 2, 1),
+         discre = ifelse(abs(student) > 2, 20, 10),
+         influ = ifelse(cooksd > 4/(nrow(.) - (length(coef(bd)) - 1) - 1), 200, 100)) 
+
+b_estimate <- mean(biden_$hat)
+
+biden_ %>%
+  dplyr::filter(lev == 2 | discre == 20 | influ == 200) %>%
+  mutate(unusual = lev + discre + influ) %>%
+  mutate(unusual = factor(unusual, levels = c(112, 121, 211, 212, 221,222), labels = c("high leverage", "high discrepancy", "high influence", "high influence and leverage", "high  influence and discrepancy",'all high'))) %>%
+  {.} -> biden_e
+
+
+
+ggplot(biden_e, aes(hat, student)) +
+  geom_hline(yintercept = 0, linetype = 2) +
+  geom_hline(yintercept = 2, linetype = 2) +
+  geom_hline(yintercept = -2, linetype = 2) +
+  geom_vline(xintercept = 2*b_estimate, linetype = 2) +
+  geom_point(aes(size = cooksd, color = unusual), shape = 1) +
+  labs(title = "Bubble plot illustrating unusual observations",
+       x = "Leverage",
+       y = "Residual") +
+  scale_size(guide = "none")
+
+all = nrow(biden_e)
+n_influence = nrow(filter(biden_e, influ==200)) 
+
+```
+          
+
+To decide how to deal with these unusual observations, we need to further look at the histogram of influential observations based on participant's party affiliation, which shows that the party affiliation may be an important determinant to the influential observations. Therefore, we could respecify the model by adding the attributes rep and dem to control for the influential effect.
+```{r bubble1, echo=TRUE}
+biden_ %>%
+  mutate(influential = factor(ifelse(influ == 200, "influential", "not influential"))) %>%
+  mutate(party = ifelse(dem==1, "Democratic", ifelse(rep==1, "Republican", "Independent"))) %>%
+  {.} -> biden_e
+
+ggplot(biden_e, mapping = aes(x = party)) +
+  geom_histogram(mapping = aes(fill = influential), width = 0.5, stat="count") +
+  labs(title = "the hisogram of influential observations on party ",
+        x = "party",
+        y = "observation count") +
+  guides(fill = guide_legend(title = ''))
+```
+    
+2 The plot below shows the non-normally distributed errors because the dot plot deviates from the straight line to a relatively large extent. We could fix this problem by power-transforming the outcome or predictors, and we choose to exponentiate the outcome variable to 1.5 in this case. 
+```{r normality, echo=T}
+car::qqPlot(bd, main = "QQ plot of Studentized Residuals",
+            ylab = "Studentized Residuals")
+```
+
+```{r normality1, echo=T}
+bd1 = lm(biden^1.5~age+female+educ,data=biden)
+car::qqPlot(bd1, main = "QQ plot of Studentized Residuals",
+            ylab = "Studentized Residuals")
+```
+
+So we can see from the plot above that the the dot plot line are more straight that the original one after the transformation. 
+
+3 Using the Breusch-Pagan test, we do find significant heteroskedasticity in the margin errors for our model, which means the estimated standard errors of predictor coeffecients are biased estimates. 
+```{r bp, echo = T}
+bptest(bd)
+```
+     
+4   Using the vif command, we can check the multicollinearity problem, and the result shows that no multicollinearality between predictors exists in the model. 
+```{r bp1, echo = T}
+car::vif(bd)
+```
+
+## Interaction Terms
+
+```{r inter, echo=T}
+bd_inter <- lm(biden ~ age + educ + age*educ, data = biden)
+```
+1 Running the code below, we can see that marginal effect of age is significant, and as the years of education increase, the marginal effect decreases. 
+```{r age, echo=T}
+effect <- function(model, mod_var){
+  int.name <- names(model$coefficients)[[which(str_detect(names(model$coefficients), ":"))]]
+  marg_var <- str_split(int.name, ":")[[1]][[which(str_split(int.name, ":")[[1]] != mod_var)]]
+  beta.hat <- coef(model)
+  cov <- vcov(model)
+  if(class(model)[[1]] == "lm"){
+    z <- seq(min(model$model[[mod_var]]), max(model$model[[mod_var]]))
+  } else {
+    z <- seq(min(model$data[[mod_var]]), max(model$data[[mod_var]]))
+  }
+  dy.dx <- beta.hat[[marg_var]] + beta.hat[[int.name]] * z
+  se.dy.dx <- sqrt(cov[marg_var, marg_var] +
+                     z^2 * cov[int.name, int.name] +
+                     2 * z * cov[marg_var, int.name])
+  data_frame(z = z,
+             dy.dx = dy.dx,
+             se = se.dy.dx)
+}
+
+effect(bd_inter, "educ") %>%
+  ggplot(aes(z, dy.dx,
+             ymin = dy.dx - 1.96 * se,
+             ymax = dy.dx + 1.96 * se)) +
+  geom_pointrange() +
+  geom_hline(yintercept = 0, linetype = 2) +
+  labs(title = "Marginal effect of Age v.s. Education",
+       x = "Education",
+       y = "marginal effect")
+
+linearHypothesis(bd_inter, "age + age:educ")
+```
+
+2  Similarly, we can see from the graph below that marginal effect of education is also significant, and as age increases, the marginal effect decreases. 
+```{r educ, echo=T}
+effect(bd_inter, "age") %>%
+  ggplot(aes(z, dy.dx,
+             ymin = dy.dx - 1.96 * se,
+             ymax = dy.dx + 1.96 * se)) +
+  geom_pointrange() +
+  geom_hline(yintercept = 0, linetype = 2) +
+  labs(title = "Marginal effect of Education v.s. Age",
+       x = "Age",
+       y = "marginal effect")
+
+linearHypothesis(bd_inter, "educ + age:educ")
+```
+
+## Missing data
+
+First we test the multivariate normality. As the graph below shows, the dataset is not multivariate normal and we could transform the predictor age and the predictor education by squaring both.
+```{r missing, echo=T}
+biden_ <- biden %>%
+  select(-female, -rep, -dem)
+uniPlot(biden_, type = "qqplot")
+mardiaTest(biden_, qqplot = FALSE)
+```
+
+Below shows the QQ plot after the transforming:
+```{r missing1, echo=T}
+biden_trans <- biden_ %>%
+  mutate(sqrt_age = sqrt(age),
+         sqrt_educ = sqrt(educ))
+
+uniPlot(biden_trans, type = "qqplot")
+mardiaTest(biden_trans%>% select(sqrt_educ, sqrt_age), qqplot = FALSE)
+```
+     
+Now for the missingness in the data, we can use the missmap function as below:
+```{r missing2, echo=T}
+biden.out <- biden_raw %>%
+  mutate(dem = as.numeric(dem),
+         rep = as.numeric(rep)) %>%
+  amelia(., m=5, sqrts = c("age", "educ"),
+         noms = c("female", "dem", "rep"), p2s = 0)
+missmap(biden.out)
+```
+     
+For comparision with the original non-imputed model, runing the following code, we can see from the table that there is no significant difference between models before and after the mutliple imputation procedure because of the relatively small number of missing values and the failing to meet the multivariate normality of the imputed model. 
+```{r missing3, echo=T}
+models_imp <- data_frame(data = biden.out$imputations) %>%
+  mutate(model = map(data, ~ lm(biden ~ age + female + educ,
+                                data = .x)),
+         coef = map(model, tidy)) %>%
+  unnest(coef, .id = "id")
+models_imp
+
+mi.meld.plus <- function(df_tidy){
+
+  coef.out <- df_tidy %>%
+    select(id:estimate) %>%
+    spread(term, estimate) %>%
+    select(-id)
+  
+  se.out <- df_tidy %>%
+    select(id, term, std.error) %>%
+    spread(term, std.error) %>%
+    select(-id)
+  
+  combined.results <- mi.meld(q = coef.out, se = se.out)
+  
+  data_frame(term = colnames(combined.results$q.mi),
+             estimate.mi = combined.results$q.mi[1, ],
+             std.error.mi = combined.results$se.mi[1, ])
+}
+
+
+tidy(bd) %>%
+  left_join(mi.meld.plus(models_imp)) %>%
+  select(-statistic, -p.value)
+```
